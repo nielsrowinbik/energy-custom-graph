@@ -15,6 +15,7 @@ import type {
   EnergyCustomGraphTimespanConfig,
   EnergyCustomGraphAggregationTarget,
   EnergyCustomGraphRawOptions,
+  EnergyCustomGraphWeatherForecastType,
 } from "./types";
 import { DEFAULT_COLORS } from "./chart/series-builder";
 import { fetchEnergyPreferences } from "./data/energy";
@@ -47,6 +48,33 @@ const AGGREGATION_OPTIONS: Array<{ value: EnergyCustomGraphAggregationTarget; la
   { value: "month", label: "Month" },
   { value: "disabled", label: "Disable fetching" },
   { value: "raw", label: "RAW (history)" },
+];
+
+const FORECAST_TYPE_OPTIONS: Array<{
+  value: EnergyCustomGraphWeatherForecastType;
+  label: string;
+}> = [
+  { value: "hourly", label: "Hourly" },
+  { value: "daily", label: "Daily" },
+  { value: "twice_daily", label: "Twice daily" },
+];
+
+const WEATHER_ATTRIBUTE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "temperature", label: "Temperature" },
+  { value: "templow", label: "Temperature (low)" },
+  { value: "apparent_temperature", label: "Apparent temperature" },
+  { value: "dew_point", label: "Dew point" },
+  { value: "pressure", label: "Pressure" },
+  { value: "humidity", label: "Humidity" },
+  { value: "wind_speed", label: "Wind speed" },
+  { value: "wind_gust_speed", label: "Wind gust speed" },
+  { value: "wind_bearing", label: "Wind bearing" },
+  { value: "cloud_coverage", label: "Cloud coverage" },
+  { value: "precipitation", label: "Precipitation" },
+  { value: "precipitation_probability", label: "Precipitation probability" },
+  { value: "uv_index", label: "UV index" },
+  { value: "ozone", label: "Ozone" },
+  { value: "visibility", label: "Visibility" },
 ];
 
 type AggregationPickerKey = "hour" | "day" | "week" | "month" | "year";
@@ -157,7 +185,9 @@ export class EnergyCustomGraphCardEditor
     return statisticId;
   }
 
-  private _resolveSeriesSource(series: EnergyCustomGraphSeriesConfig): "statistic" | "calculation" | "forecast" {
+  private _resolveSeriesSource(
+    series: EnergyCustomGraphSeriesConfig
+  ): "statistic" | "calculation" | "forecast" | "weather_forecast" {
     if (series.source) {
       return series.source;
     }
@@ -238,7 +268,7 @@ export class EnergyCustomGraphCardEditor
       ...config,
       series: normalizedSeries,
     };
-    nextConfig.type = "custom:energy-custom-graph-card";
+    nextConfig.type = "custom:new-statistics-graph";
     nextConfig.timespan = config.timespan ?? { mode: "energy" };
     this._config = nextConfig;
     this._syncCustomColorDrafts(normalizedSeries);
@@ -719,6 +749,14 @@ export class EnergyCustomGraphCardEditor
           onInput: (value) =>
             this._updateConfig("chart_height", value || undefined),
         })}
+        ${this._renderTextInput({
+          label: "Forecast horizon",
+          helper:
+            "Optional. Extends the chart beyond the selected period so upcoming forecast data stays visible (e.g. 48h, 7d). Leave empty to follow the period.",
+          value: cfg.forecast_horizon ?? "",
+          onInput: (value) =>
+            this._updateConfig("forecast_horizon", value || undefined),
+        })}
 ${this._renderTimespanSection(cfg)}
       </div>
       ${this._renderLegendSection(cfg)}
@@ -1051,7 +1089,7 @@ ${this._renderTimespanSection(cfg)}
         </div>
         <div class="group-body series-source-body">
           <div class="segment-group" role="group" aria-label="Data source">
-            ${(["statistic", "calculation", "forecast"] as const).map(
+            ${(["statistic", "calculation", "forecast", "weather_forecast"] as const).map(
               (mode) => html`
                 <button
                   type="button"
@@ -1065,7 +1103,9 @@ ${this._renderTimespanSection(cfg)}
                     ? "Statistic"
                     : mode === "calculation"
                       ? "Calculation"
-                      : "Forecast"}
+                      : mode === "forecast"
+                        ? "Solar forecast"
+                        : "Weather"}
                 </button>
               `
             )}
@@ -1074,7 +1114,9 @@ ${this._renderTimespanSection(cfg)}
             ? this._renderSeriesCalculationContent(series, index)
             : source === "forecast"
               ? this._renderSeriesForecastContent(series, index)
-              : this._renderSeriesStatisticContent(series, index)}
+              : source === "weather_forecast"
+                ? this._renderSeriesWeatherForecastContent(series, index)
+                : this._renderSeriesStatisticContent(series, index)}
         </div>
       </div>
     `;
@@ -1155,6 +1197,70 @@ ${this._renderTimespanSection(cfg)}
       ${this._solarOptionsError
         ? html`<p class="error">${this._solarOptionsError}</p>`
         : nothing}
+    `;
+  }
+
+  private _renderSeriesWeatherForecastContent(
+    series: EnergyCustomGraphSeriesConfig,
+    index: number
+  ) {
+    if (!this.hass) {
+      return html`<p>Loading...</p>`;
+    }
+    const forecastType = series.forecast_type ?? "hourly";
+    const attribute = series.attribute ?? "";
+    return html`
+      <p class="hint">
+        Plot a forecast attribute from a weather entity. Forecast data is
+        now-forward only; set the card's forecast horizon to extend the visible
+        time range beyond the selected period.
+      </p>
+      <ha-entity-picker
+        .hass=${this.hass}
+        .value=${series.weather_entity}
+        .label=${"Weather entity"}
+        .includeDomains=${["weather"]}
+        allow-custom-entity
+        @value-changed=${(ev: CustomEvent) =>
+          this._updateSeries(index, "weather_entity", ev.detail.value || undefined)}
+      ></ha-entity-picker>
+      <div class="field">
+        <label>Forecast type</label>
+        <select
+          @change=${(ev: Event) =>
+            this._updateSeries(
+              index,
+              "forecast_type",
+              (ev.target as HTMLSelectElement).value as EnergyCustomGraphWeatherForecastType
+            )}
+        >
+          ${FORECAST_TYPE_OPTIONS.map(
+            (option) =>
+              html`<option value=${option.value} ?selected=${forecastType === option.value}
+                >${option.label}</option
+              >`
+          )}
+        </select>
+      </div>
+      <div class="field">
+        <label>Attribute</label>
+        <select
+          @change=${(ev: Event) =>
+            this._updateSeries(
+              index,
+              "attribute",
+              (ev.target as HTMLSelectElement).value || undefined
+            )}
+        >
+          <option value="" ?selected=${attribute === ""}>Select an attribute…</option>
+          ${WEATHER_ATTRIBUTE_OPTIONS.map(
+            (option) =>
+              html`<option value=${option.value} ?selected=${attribute === option.value}
+                >${option.label}</option
+              >`
+          )}
+        </select>
+      </div>
     `;
   }
 
@@ -1803,7 +1909,10 @@ ${this._renderTimespanSection(cfg)}
     this._updateSeries(index, "line_style", style);
   }
 
-  private _setSeriesSource(index: number, mode: "statistic" | "calculation" | "forecast") {
+  private _setSeriesSource(
+    index: number,
+    mode: "statistic" | "calculation" | "forecast" | "weather_forecast"
+  ) {
     const series = this._config!.series ?? [];
     const current = series[index];
     if (!current) {
@@ -1830,6 +1939,24 @@ ${this._renderTimespanSection(cfg)}
       target.source = "forecast";
       target.statistic_id = undefined;
       target.calculation = undefined;
+      target.weather_entity = undefined;
+      target.attribute = undefined;
+      updatedSeries[index] = target;
+      this._updateConfig("series", updatedSeries);
+      this._expandedSeries = new Set(this._expandedSeries).add(index);
+      return;
+    }
+    if (mode === "weather_forecast") {
+      if (current.calculation) {
+        this._convertSeriesToStatistic(index);
+      }
+      const updatedSeries = [...(this._config!.series ?? [])];
+      const target = { ...updatedSeries[index] };
+      target.source = "weather_forecast";
+      target.statistic_id = undefined;
+      target.calculation = undefined;
+      target.pv_production_entity = undefined;
+      target.forecast_type = target.forecast_type ?? "hourly";
       updatedSeries[index] = target;
       this._updateConfig("series", updatedSeries);
       this._expandedSeries = new Set(this._expandedSeries).add(index);
@@ -1840,6 +1967,8 @@ ${this._renderTimespanSection(cfg)}
     }
     this._updateSeries(index, "source", undefined);
     this._updateSeries(index, "pv_production_entity", undefined);
+    this._updateSeries(index, "weather_entity", undefined);
+    this._updateSeries(index, "attribute", undefined);
   }
 
   private _addSeries() {

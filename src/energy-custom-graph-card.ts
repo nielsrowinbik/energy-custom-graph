@@ -49,6 +49,17 @@ import {
   type EnergySolarForecasts,
   type SolarSourceTypeEnergyPreference,
 } from "./data/energy";
+import {
+  parseDurationToMs,
+  subscribeWeatherForecast,
+  filterForecastPoints,
+  weatherForecastToPoints,
+  pointsToStatisticValues,
+  forecastTypeIntervalMs,
+  weatherAttributeUnit,
+  type WeatherForecastEvent,
+  type WeatherForecastItem,
+} from "./data/forecast";
 import type {
   EnergyCustomGraphCardConfig,
   EnergyCustomGraphSeriesConfig,
@@ -123,7 +134,7 @@ class TimeoutError extends Error {
   }
 }
 
-@customElement("energy-custom-graph-card")
+@customElement("new-statistics-graph")
 export class EnergyCustomGraphCard extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
 
@@ -180,6 +191,11 @@ export class EnergyCustomGraphCard extends LitElement {
   @state() private _forecastSeriesUnits: Map<string, string | null | undefined> = new Map();
   @state() private _forecastSeriesDataCompare: Map<string, StatisticValue[]> = new Map();
   @state() private _forecastSeriesUnitsCompare: Map<string, string | null | undefined> = new Map();
+  @state() private _weatherForecastData: Map<string, StatisticValue[]> = new Map();
+  @state() private _weatherForecastUnits: Map<string, string | null | undefined> = new Map();
+  private _weatherForecastUnsubs: Map<number, Promise<UnsubscribeFunc | void>> = new Map();
+  private _weatherForecastKeys: Map<number, string> = new Map();
+  private _weatherForecastRaw: Map<number, WeatherForecastItem[]> = new Map();
 
   private _fetchStates: Map<FetchKey, FetchState> = new Map();
   private _activeFetchCounters: Record<FetchKey, number> = {
@@ -212,6 +228,7 @@ export class EnergyCustomGraphCard extends LitElement {
       this._pauseVisibilityTimers();
       void this._teardownRawStream("main");
       void this._teardownRawStream("compare");
+      void this._teardownAllWeatherForecasts();
     } else {
       this._log("info", "Document visible; scheduling refresh", {
         hidden: false,
@@ -289,6 +306,7 @@ export class EnergyCustomGraphCard extends LitElement {
     }
     void this._teardownRawStream("main");
     void this._teardownRawStream("compare");
+    void this._teardownAllWeatherForecasts();
     for (const state of this._fetchStates.values()) {
       if (state.timeout) {
         clearTimeout(state.timeout);
@@ -377,6 +395,8 @@ export class EnergyCustomGraphCard extends LitElement {
     const seriesChanged =
       !!oldConfig &&
       JSON.stringify(oldConfig.series) !== JSON.stringify(this._config.series);
+    const horizonChanged =
+      !!oldConfig && oldConfig.forecast_horizon !== this._config.forecast_horizon;
 
     if (periodChanged || seriesChanged) {
       void this._teardownRawStream("main");
@@ -394,6 +414,11 @@ export class EnergyCustomGraphCard extends LitElement {
     ) {
       this._scheduleLoad("compare");
     }
+
+    this._syncWeatherForecasts();
+    if (periodChanged || seriesChanged || horizonChanged) {
+      this._rebuildWeatherForecastData();
+    }
   }
 
   private _needsEnergyCollection(
@@ -404,7 +429,7 @@ export class EnergyCustomGraphCard extends LitElement {
 
   private _getSeriesSource(
     series: EnergyCustomGraphSeriesConfig
-  ): "statistic" | "calculation" | "forecast" {
+  ): "statistic" | "calculation" | "forecast" | "weather_forecast" {
     if (series.source) {
       return series.source;
     }
@@ -424,9 +449,36 @@ export class EnergyCustomGraphCard extends LitElement {
     return this._getSeriesSource(series) === "forecast";
   }
 
+  private _seriesUsesWeatherForecast(series?: EnergyCustomGraphSeriesConfig): boolean {
+    if (!series) {
+      return false;
+    }
+    return this._getSeriesSource(series) === "weather_forecast";
+  }
+
+  private _isForecastLikeSeries(series?: EnergyCustomGraphSeriesConfig): boolean {
+    return this._seriesUsesForecast(series) || this._seriesUsesWeatherForecast(series);
+  }
+
   private _hasForecastSeries(config: EnergyCustomGraphCardConfig | undefined = this._config): boolean {
     return Boolean(
       config?.series?.some((series) => this._seriesUsesForecast(series))
+    );
+  }
+
+  private _hasWeatherForecastSeries(
+    config: EnergyCustomGraphCardConfig | undefined = this._config
+  ): boolean {
+    return Boolean(
+      config?.series?.some((series) => this._seriesUsesWeatherForecast(series))
+    );
+  }
+
+  private _hasForecastLikeSeries(
+    config: EnergyCustomGraphCardConfig | undefined = this._config
+  ): boolean {
+    return Boolean(
+      config?.series?.some((series) => this._isForecastLikeSeries(series))
     );
   }
 
@@ -1052,6 +1104,7 @@ export class EnergyCustomGraphCard extends LitElement {
       ) {
         this._scheduleLoad("compare");
       }
+      this._syncWeatherForecasts();
       this._scheduleAutoRefresh();
     }, VISIBILITY_REFRESH_DELAY_MS);
   }
@@ -2386,12 +2439,6 @@ export class EnergyCustomGraphCard extends LitElement {
         if (!Number.isFinite(timestamp)) {
           return;
         }
-        if (timestamp < rangeStart) {
-          return;
-        }
-        if (rangeEnd !== null && timestamp > rangeEnd) {
-          return;
-        }
         const valueKwh = value / 1000;
         combined.set(timestamp, (combined.get(timestamp) ?? 0) + valueKwh);
       });
@@ -2401,30 +2448,43 @@ export class EnergyCustomGraphCard extends LitElement {
       return [];
     }
 
-    const sortedEntries = Array.from(combined.entries()).sort((a, b) => a[0] - b[0]);
+    const isAggregated = !(
+      !aggregation ||
+      aggregation === "raw" ||
+      aggregation === "disabled"
+    );
+    const bucketPeriod: StatisticsPeriod = isAggregated
+      ? (aggregation as StatisticsPeriod)
+      : "hour";
+    // Forecasts are now-forward: drop points before the current bucket so a
+    // past picker window renders nothing.
+    const nowFloor = this._alignForecastBucketStart(Date.now(), bucketPeriod);
 
-    if (!aggregation || aggregation === "raw" || aggregation === "disabled") {
-      return sortedEntries.map(([timestamp, value]) => ({
-        start: timestamp,
-        end: timestamp + HOUR_MS,
-        change: value,
-        sum: value,
-        mean: value,
-        min: value,
-        max: value,
-        state: value,
-      }));
+    const points = filterForecastPoints(
+      Array.from(combined.entries()).map(([timestamp, value]) => ({
+        timestamp,
+        value,
+      })),
+      { now: nowFloor, rangeStart, rangeEnd }
+    );
+
+    if (!points.length) {
+      return [];
+    }
+
+    if (!isAggregated) {
+      return pointsToStatisticValues(points, HOUR_MS);
     }
 
     const bucketSums = new Map<number, number>();
-    sortedEntries.forEach(([timestamp, value]) => {
-      const bucketStart = this._alignForecastBucketStart(timestamp, aggregation);
+    points.forEach(({ timestamp, value }) => {
+      const bucketStart = this._alignForecastBucketStart(timestamp, bucketPeriod);
       bucketSums.set(bucketStart, (bucketSums.get(bucketStart) ?? 0) + value);
     });
 
     const buckets = Array.from(bucketSums.entries()).sort((a, b) => a[0] - b[0]);
     return buckets.map(([bucketStart, value]) => {
-      const bucketEnd = this._advanceBucket(new Date(bucketStart), aggregation).getTime();
+      const bucketEnd = this._advanceBucket(new Date(bucketStart), bucketPeriod).getTime();
       return {
         start: bucketStart,
         end: bucketEnd,
@@ -2466,7 +2526,11 @@ export class EnergyCustomGraphCard extends LitElement {
     }
 
     const rangeStart = this._statisticsRange?.start ?? this._periodStart.getTime();
-    const rangeEnd = this._periodEnd?.getTime() ?? this._statisticsRange?.end ?? null;
+    const horizonMs = parseDurationToMs(this._config.forecast_horizon);
+    const rangeEnd =
+      horizonMs && this._periodEnd
+        ? this._periodEnd.getTime() + horizonMs
+        : this._periodEnd?.getTime() ?? this._statisticsRange?.end ?? null;
     const aggregation = this._statisticsPeriod;
 
     const data = new Map<string, StatisticValue[]>();
@@ -2490,6 +2554,196 @@ export class EnergyCustomGraphCard extends LitElement {
     this._forecastSeriesUnits = units;
     this._forecastSeriesDataCompare = new Map();
     this._forecastSeriesUnitsCompare = new Map();
+  }
+
+  private _forecastHorizonMs(): number | undefined {
+    return parseDurationToMs(this._config?.forecast_horizon);
+  }
+
+  private _weatherForecastKey(
+    series: EnergyCustomGraphSeriesConfig
+  ): string | undefined {
+    const entity = series.weather_entity?.trim();
+    if (!entity) {
+      return undefined;
+    }
+    const forecastType = series.forecast_type ?? "hourly";
+    return `${entity}|${forecastType}`;
+  }
+
+  private _weatherRangeEnd(): number | null {
+    const periodEnd = this._periodEnd?.getTime() ?? null;
+    if (periodEnd === null) {
+      return null;
+    }
+    const horizonMs = this._forecastHorizonMs();
+    return horizonMs ? periodEnd + horizonMs : periodEnd;
+  }
+
+  private _clearWeatherForecastData(): void {
+    if (this._weatherForecastData.size) {
+      this._weatherForecastData = new Map();
+    }
+    if (this._weatherForecastUnits.size) {
+      this._weatherForecastUnits = new Map();
+    }
+  }
+
+  private _syncWeatherForecasts(): void {
+    if (!this.hass || !this._config || !this.isConnected || !this._isPageVisible) {
+      return;
+    }
+
+    const desired = new Map<number, EnergyCustomGraphSeriesConfig>();
+    this._config.series.forEach((series, index) => {
+      if (
+        this._seriesUsesWeatherForecast(series) &&
+        this._weatherForecastKey(series)
+      ) {
+        desired.set(index, series);
+      }
+    });
+
+    // Tear down subscriptions whose series was removed or whose entity /
+    // forecast_type changed.
+    for (const index of Array.from(this._weatherForecastUnsubs.keys())) {
+      const series = desired.get(index);
+      const nextKey = series ? this._weatherForecastKey(series) : undefined;
+      if (!series || nextKey !== this._weatherForecastKeys.get(index)) {
+        void this._teardownWeatherForecast(index);
+      }
+    }
+    // Drop cached raw for indices that are no longer weather series.
+    for (const index of Array.from(this._weatherForecastRaw.keys())) {
+      if (!desired.has(index)) {
+        this._weatherForecastRaw.delete(index);
+      }
+    }
+
+    // (Re)subscribe where needed.
+    desired.forEach((series, index) => {
+      const key = this._weatherForecastKey(series)!;
+      if (
+        this._weatherForecastKeys.get(index) === key &&
+        this._weatherForecastUnsubs.has(index)
+      ) {
+        return;
+      }
+      this._setupWeatherForecast(index, series, key);
+    });
+  }
+
+  private _setupWeatherForecast(
+    index: number,
+    series: EnergyCustomGraphSeriesConfig,
+    key: string
+  ): void {
+    if (!this.hass) {
+      return;
+    }
+    const entity = series.weather_entity!.trim();
+    const forecastType = series.forecast_type ?? "hourly";
+    this._weatherForecastKeys.set(index, key);
+    const subscription = subscribeWeatherForecast(
+      this.hass,
+      entity,
+      forecastType,
+      (event) => this._handleWeatherForecastMessage(index, event)
+    )
+      .then((unsub) => {
+        this._log("debug", "Subscribed to weather forecast", {
+          index,
+          entity,
+          forecastType,
+        });
+        return unsub;
+      })
+      .catch((error) => {
+        this._log("error", "Failed to subscribe to weather forecast", {
+          index,
+          entity,
+          error: error instanceof Error ? error.message : error,
+        });
+        this._weatherForecastUnsubs.delete(index);
+        this._weatherForecastKeys.delete(index);
+        return undefined;
+      });
+    this._weatherForecastUnsubs.set(index, subscription);
+  }
+
+  private async _teardownWeatherForecast(index: number): Promise<void> {
+    const handle = this._weatherForecastUnsubs.get(index);
+    this._weatherForecastUnsubs.delete(index);
+    this._weatherForecastKeys.delete(index);
+    if (!handle) {
+      return;
+    }
+    try {
+      const unsubscribe = await handle;
+      if (typeof unsubscribe === "function") {
+        await unsubscribe();
+      }
+      this._log("debug", "Weather forecast unsubscribed", { index });
+    } catch (error) {
+      this._log("warn", "Failed to unsubscribe weather forecast", {
+        index,
+        error: error instanceof Error ? error.message : error,
+      });
+    }
+  }
+
+  private async _teardownAllWeatherForecasts(): Promise<void> {
+    const indices = Array.from(this._weatherForecastUnsubs.keys());
+    await Promise.all(indices.map((index) => this._teardownWeatherForecast(index)));
+  }
+
+  private _handleWeatherForecastMessage(
+    index: number,
+    event: WeatherForecastEvent
+  ): void {
+    const forecast = Array.isArray(event?.forecast) ? event.forecast : [];
+    this._weatherForecastRaw.set(index, forecast);
+    this._rebuildWeatherForecastData();
+  }
+
+  private _rebuildWeatherForecastData(): void {
+    if (!this._config || !this._hasWeatherForecastSeries()) {
+      this._weatherForecastRaw.clear();
+      this._clearWeatherForecastData();
+      return;
+    }
+
+    const now = Date.now();
+    const rangeEnd = this._weatherRangeEnd();
+    const data = new Map<string, StatisticValue[]>();
+    const units = new Map<string, string | null | undefined>();
+
+    this._config.series.forEach((series, index) => {
+      if (!this._seriesUsesWeatherForecast(series)) {
+        return;
+      }
+      const raw = this._weatherForecastRaw.get(index);
+      const attribute = series.attribute?.trim();
+      if (!raw || !raw.length || !attribute) {
+        return;
+      }
+      const points = filterForecastPoints(
+        weatherForecastToPoints(raw, attribute),
+        { now, rangeEnd }
+      );
+      if (!points.length) {
+        return;
+      }
+      const key = this._getForecastKey(index);
+      const interval = forecastTypeIntervalMs(series.forecast_type ?? "hourly");
+      data.set(key, pointsToStatisticValues(points, interval));
+      const entity = series.weather_entity?.trim();
+      const stateObj = entity ? this.hass?.states[entity] : undefined;
+      units.set(key, weatherAttributeUnit(stateObj?.attributes, attribute));
+    });
+
+    this._weatherForecastData = data;
+    this._weatherForecastUnits = units;
   }
 
   private _hasActiveRawStream(target: "main" | "compare"): boolean {
@@ -3250,7 +3504,7 @@ export class EnergyCustomGraphCard extends LitElement {
 
   public static getStubConfig(): EnergyCustomGraphCardConfig {
     return {
-      type: "custom:energy-custom-graph-card",
+      type: "custom:new-statistics-graph",
       series: [],
     };
   }
@@ -3341,7 +3595,8 @@ export class EnergyCustomGraphCard extends LitElement {
       changedProps.has("_comparePeriodEnd") ||
       changedProps.has("_config") ||
       changedProps.has("_forecastSeriesData") ||
-      changedProps.has("_forecastSeriesDataCompare")
+      changedProps.has("_forecastSeriesDataCompare") ||
+      changedProps.has("_weatherForecastData")
     ) {
       this._generateChart();
     }
@@ -3524,6 +3779,13 @@ export class EnergyCustomGraphCard extends LitElement {
       ? getComputedStyle(this)
       : getComputedStyle(document.documentElement);
 
+    const forecastData = new Map<string, StatisticValue[]>(this._forecastSeriesData);
+    this._weatherForecastData.forEach((value, key) => forecastData.set(key, value));
+    const forecastUnits = new Map<string, string | null | undefined>(
+      this._forecastSeriesUnits
+    );
+    this._weatherForecastUnits.forEach((value, key) => forecastUnits.set(key, value));
+
     const {
       series: mainSeries,
       legend,
@@ -3538,8 +3800,8 @@ export class EnergyCustomGraphCard extends LitElement {
       computedStyle,
       calculatedData: this._calculatedSeriesData,
       calculatedUnits: this._calculatedSeriesUnits,
-      forecastData: this._forecastSeriesData,
-      forecastUnits: this._forecastSeriesUnits,
+      forecastData,
+      forecastUnits,
     });
 
     const combinedSeriesById = new Map(seriesById);
@@ -3826,9 +4088,14 @@ export class EnergyCustomGraphCard extends LitElement {
 
     const legendOption = this._buildLegendOption(legend, legendSecondaryIds);
 
-    const axisMax = this._periodEnd
+    let axisMax = this._periodEnd
       ? this._computeSuggestedXAxisMax(this._periodStart, this._periodEnd)
       : (this._statisticsRange.end ?? this._periodStart.getTime());
+
+    const horizonMs = this._forecastHorizonMs();
+    if (horizonMs && this._periodEnd && this._hasForecastLikeSeries()) {
+      axisMax = Math.max(axisMax, this._periodEnd.getTime() + horizonMs);
+    }
 
     const xAxis: XAxisOption[] = [
       {
@@ -3946,12 +4213,12 @@ export class EnergyCustomGraphCard extends LitElement {
       }
       const config = this._seriesConfigById.get(serieId);
       if (config) {
-        return this._seriesUsesForecast(config);
+        return this._isForecastLikeSeries(config);
       }
       if (serieId.endsWith("--compare")) {
         const baseId = serieId.replace(/--compare$/, "");
         const baseConfig = this._seriesConfigById.get(baseId);
-        return baseConfig ? this._seriesUsesForecast(baseConfig) : false;
+        return baseConfig ? this._isForecastLikeSeries(baseConfig) : false;
       }
       return false;
     };
@@ -5626,6 +5893,6 @@ export class EnergyCustomGraphCard extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    "energy-custom-graph-card": EnergyCustomGraphCard;
+    "new-statistics-graph": EnergyCustomGraphCard;
   }
 }

@@ -9,8 +9,8 @@ import "./energy-custom-graph-card-editor";
 
 window.customCards = window.customCards || [];
 window.customCards.push({
-  type: "energy-custom-graph-card",
-  name: "Energy Custom Graph",
+  type: "new-statistics-graph",
+  name: "New Statistics Graph",
   description:
-    "Flexible energy statistics chart with custom stacking, axes, and colors.",
+    "General-purpose graph for any recorder statistics, history, and forecast data with custom stacking, dual axes, and colors.",
 });

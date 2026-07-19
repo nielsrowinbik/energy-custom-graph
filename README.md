@@ -1,16 +1,18 @@
-# Energy Custom Graph
-This card provides a lightweight graph that supports the Home Assistant energy date picker for time range selection. It reuses the built-in ECharts instance shipped with Home Assistant, so you get native styling with minimal overhead.
+# New Statistics Graph
+A general-purpose graph card for Home Assistant. Plot **any** recorder statistic, short-term 'raw' history, calculated series, and **forecast data** (solar or weather) together on one chart. It reuses the built-in ECharts instance shipped with Home Assistant, so you get native styling with minimal overhead, and it can optionally follow the energy date picker for time range selection.
 
-Unlike the default energy cards like `energy-usage-graph`, this card is not limited to the energy dashboard entities. Any long-term statistic available in the recorder database can be used, as well as the short-term 'raw' history. For aggregated statistics you can choose the type (`change`, `sum`, `mean`, `min`, `max`, `state`) for each series separately.  
+Unlike the default cards like `energy-usage-graph` or `statistics-graph`, this card is not limited to energy dashboard entities. Any long-term statistic available in the recorder database can be used, as well as the short-term 'raw' history and live forecasts. For aggregated statistics you can choose the type (`change`, `sum`, `mean`, `min`, `max`, `state`) for each series separately.  
 <br>
-I know the `Statistics graph card` also supports the energy date picker nowadays, but it didn't provide all the features I needed.
+It grew out of an energy-focused card, so it integrates tightly with the energy date picker, but nothing about it is energy-specific anymore.
 
 ## Key Features
 
 - This card has an full-featured graphical editor, so almost all settings can be done through the UI.
 - Displayed timespan sync with the energy date picker (`energy-date-selection`).
 - Supports any entity that exposes long-term statistics, as well as the short-term 'raw' history.
-- Solar forecast entities that are used in the energy dashboard can also be shown in the charts. 
+- Solar forecast entities that are used in the energy dashboard can also be shown in the charts.
+- Weather forecast attributes (temperature, precipitation, wind, humidity, …) can be plotted from any `weather.*` entity, fetched live via the same websocket API the native weather-forecast card uses.
+- Optional `forecast_horizon` extends the visible time range beyond the selected period so upcoming forecast data stays in view.
 - Allows to compute and display 'live' values for the current running hour before HA provides the final aggregation.
 - Uses Home Assistant's bundled ECharts runtime – no extra framework needs to be loaded.
 - Override the energy date pickers default aggregation periods, to e.g. display hourly instead of daily bars when viewing a monthly report.
@@ -78,7 +80,7 @@ I know the `Statistics graph card` also supports the energy date picker nowadays
 
 1. In Home Assistant, open *HACS > Frontend* and click the three-dot menu in the top right.
 2. Choose *Custom repositories*, add `https://github.com/Thyraz/energy-custom-graph`, and leave the category set to *Lovelace*.
-3. Search for "Energy Custom Graph" in HACS, install the latest release.
+3. Search for "New Statistics Graph" in HACS, install the latest release.
 4. Reload the browser and clear the Browser cache if the card won't show up immediately.
 
 ### Manual installation
@@ -95,7 +97,7 @@ I know the `Statistics graph card` also supports the energy date picker nowadays
 Add the card to a dashboard using the graphical card editor or via YAML:
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Custom energy overview
 series:
   - statistic_id: sensor.energy_grid_import
@@ -116,10 +118,11 @@ By default the card mirrors the core energy cards and automatically selects the 
 
 | Key | Type | Default | Description |
 | --- | ---- | ------- | ----------- |
-| `type` | string | – | Must be `custom:energy-custom-graph-card`. |
+| `type` | string | – | Must be `custom:new-statistics-graph`. |
 | `title` | string | – | Optional card header. |
 | `chart_height` | string | – | CSS height (e.g. `300px`). Ignored when the card is used inside a section layout (the grid rows control the height). |
 | `timespan` | object | `{mode: "energy"}` | Controls the time range displayed (see below). |
+| `forecast_horizon` | string | – | Optional. Extends the chart's x-axis beyond the selected period end so upcoming forecast data stays visible (e.g. `48h`, `7d`). Off by default; see the note under Timespan options. |
 | `collection_key` | string | – | Custom key when multiple energy date pickers are present (only for `timespan.mode: "energy"`). <br>[More Info](https://www.home-assistant.io/dashboards/energy/#using-multiple-collections) |
 | `allow_compare` | boolean | `true` | For energy date picker mode: Respects the compare toggle when `true`. Set to `false` to disable this behavior. |
 | `hide_legend` | boolean | `false` | Hide the legend entirely. |
@@ -169,12 +172,28 @@ timespan:
 ```
 Display a fixed time range. Dates use ISO 8601 format. If omitted, `start` defaults to the beginning of today and `end` defaults to the end of the start day.
 
+**Forecast horizon**
+
+Forecast series (`source: forecast` and `source: weather_forecast`) are always now-forward — they only ever contain data from the current moment onwards, so a picker window entirely in the past renders no forecast at all. By default the x-axis still ends at the selected period end, which can cut a forecast short.
+
+Set the top-level `forecast_horizon` (e.g. `48h`, `7d`) to push the x-axis maximum past the period end by that duration, so the full forecast horizon is visible while the picker still shows the current period. It also widens how far forward forecast data is fetched. Supported units: `s`, `m`, `h`, `d`, `w`. When unset, the picker-driven axis behaviour is unchanged.
+
+```yaml
+type: custom:new-statistics-graph
+forecast_horizon: 48h
+series:
+  - source: weather_forecast
+    weather_entity: weather.home
+    attribute: temperature
+    chart_type: line
+```
+
 ### `series` options
 
 | Key | Type | Default | Description |
 | --- | ---- | ------- | ----------- |
 | `name` | string | entity name | Display name shown in tooltip and legend. |
-| `source` | `"statistic"`, `"calculation"`, `"forecast"` | inferred | Data source type. When omitted the card can auto-detect the source based on the other fields for `statistic` and `calculation` signals. Use `forecast` to plot solar forecasts configured in the Energy dashboard. |
+| `source` | `"statistic"`, `"calculation"`, `"forecast"`, `"weather_forecast"` | inferred | Data source type. When omitted the card can auto-detect the source based on the other fields for `statistic` and `calculation` signals. Use `forecast` to plot solar forecasts configured in the Energy dashboard, or `weather_forecast` to plot a forecast attribute from a `weather.*` entity. |
 | `statistic_id` | string | – | Entity with long term statistics (e.g. `sensor.entity_id`). Required unless series uses a `calculation` instead. |
 | `stat_type` | `"change"`, `"sum"`, `"mean"`, `"min"`, `"max"`, `"state"` | `"change"` | Statistic type to display for this entity. Not used when `calculation` is provided, as each subseries has it's own setting there. |
 | `calculation` | object | – | Build a computed series from multiple statistics / terms (see below). |
@@ -197,7 +216,10 @@ Display a fixed time range. Dates use ISO 8601 format. If omitted, `start` defau
 | `add` | number | `0` | Apply an additive offset after multiplication. |
 | `clip_min` | number | – | Values will be set to this value if they are smaller. |
 | `clip_max` | number | – | Values will be set to this value if they are larger. |
-| `pv_production_entity` | string | – | (Forecast only) Sensor entity you configured as PV production in the Energy dashboard. Leave unset to sum all configured forecasts. |
+| `pv_production_entity` | string | – | (`source: forecast` only) Sensor entity you configured as PV production in the Energy dashboard. Leave unset to sum all configured forecasts. |
+| `weather_entity` | string | – | (`source: weather_forecast` only) A `weather.*` entity to fetch the forecast from. Required. |
+| `forecast_type` | `"hourly"`, `"daily"`, `"twice_daily"` | `"hourly"` | (`source: weather_forecast` only) Which forecast the entity should provide. Must be supported by the weather integration. |
+| `attribute` | string | – | (`source: weather_forecast` only) Forecast field to plot, e.g. `temperature`, `templow`, `precipitation`, `wind_speed`, `humidity`, `pressure`. Required. |
 
 #### Calculated series
 
@@ -246,6 +268,33 @@ series:
 ```
 
 All display options (colors, stacking, smoothing, etc.) work exactly like for statistic-based series.
+
+#### Weather forecast series
+
+Set `source: weather_forecast` on a series to plot a forecast attribute from any `weather.*` entity. The data is fetched live via the stable `weather/subscribe_forecast` websocket command — the same mechanism the native weather-forecast card uses — so no extra configuration is needed beyond picking the entity, forecast type, and attribute.
+
+- `weather_entity` (required): the `weather.*` entity to subscribe to.
+- `forecast_type` (default `hourly`): `hourly`, `daily`, or `twice_daily`. The entity must support the chosen type.
+- `attribute` (required): the forecast field to plot, e.g. `temperature`, `templow`, `precipitation`, `wind_speed`, `humidity`, `pressure`. Plot one attribute per series — add another series for another attribute.
+
+Notes:
+
+- Forecasts are **now-forward** only: points before the current time are dropped, so a picker window entirely in the past shows nothing. Use `forecast_horizon` to extend the visible range past the period end (see Timespan options).
+- The card derives the unit from the weather entity's `*_unit` attributes when possible (temperature, precipitation, wind, pressure, visibility) and uses `%` for humidity/cloud coverage. Override it per axis with `y_axes[].unit` if needed.
+- All display options (color, `chart_type`, `line_style`, `fill`, `smooth`, `y_axis`, `multiply`, `add`, …) work exactly like for statistic-based series.
+
+Example:
+
+```yaml
+series:
+  - source: weather_forecast
+    weather_entity: weather.home
+    forecast_type: hourly
+    attribute: temperature
+    chart_type: line
+    name: Forecast temperature
+    y_axis: right
+```
 
 #### Fill between line series
 
@@ -303,7 +352,7 @@ Tip: use fine intervals only for short ranges to avoid excessive resource usage 
 ### 1. Manual fixed window with dual axes
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Heating performance snapshot
 timespan:
   mode: fixed
@@ -332,7 +381,7 @@ series:
 ### 1a. Centered zero axis for grid import/export comparison
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Grid power balance
 y_axes:
   - id: left
@@ -354,7 +403,7 @@ series:
 ### 2. Shift the period for a previous year view
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Solar production (last year)
 timespan:
   mode: relative
@@ -369,7 +418,7 @@ series:
 ### 2a. Rolling window for last 30 days
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Energy consumption (last 30 days)
 timespan:
   mode: relative
@@ -384,7 +433,7 @@ series:
 ### 3. Fill the range between minimum and maximum
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Outdoor temperature band
 series:
   - statistic_id: sensor.outdoor_temperature
@@ -401,7 +450,7 @@ series:
 ### 4. Recreate the energy dashboard usage card
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 hide_legend: true
 series:
   - name: Solar self consumed
@@ -447,7 +496,7 @@ series:
 This setup draws a step line for a binary sensor. RAW history is used for the shortest two picker ranges, while longer ranges disable fetching and prompt the user to select a shorter period.
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Garage door activity
 series:
   - statistic_id: binary_sensor.garage_door
@@ -467,7 +516,7 @@ aggregation:
 ### 6. Hourly consumption with live current hour
 
 ```yaml
-type: custom:energy-custom-graph-card
+type: custom:new-statistics-graph
 title: Consumption
 aggregation:
   energy_picker:
@@ -486,6 +535,36 @@ series:
 ```
 
 With `compute_current_hour` enabled the card keeps the current hour up to date using 5 minute statistics, while historical hours continue to come from Home Assistant’s long-term database.
+
+### 7. Measured temperature vs. weather forecast
+
+Plot a measured sensor as a solid line on the left axis and a weather forecast attribute as a dashed line on the right axis. `forecast_horizon` extends the chart 48 hours past the selected period so the upcoming forecast stays visible.
+
+```yaml
+type: custom:new-statistics-graph
+title: Temperature vs. forecast
+forecast_horizon: 48h
+y_axes:
+  - id: left
+    unit: °C
+  - id: right
+    unit: °C
+series:
+  - statistic_id: sensor.living_room_temperature
+    name: Measured
+    stat_type: mean
+    chart_type: line
+    line_style: solid
+    y_axis: left
+  - source: weather_forecast
+    weather_entity: weather.home
+    forecast_type: hourly
+    attribute: temperature
+    name: Forecast
+    chart_type: line
+    line_style: dashed
+    y_axis: right
+```
 
 ## Tips
 
