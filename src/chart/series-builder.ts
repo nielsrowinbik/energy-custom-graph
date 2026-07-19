@@ -202,13 +202,14 @@ export const buildSeries = ({
   };
 
   configSeries.forEach((seriesConfig, index) => {
-    const source: "statistic" | "calculation" | "forecast" =
+    const source: "statistic" | "calculation" | "forecast" | "weather_forecast" =
       seriesConfig.source ?? (seriesConfig.calculation ? "calculation" : "statistic");
+    const isForecast = source === "forecast" || source === "weather_forecast";
 
     const statisticId =
       source === "statistic" ? seriesConfig.statistic_id?.trim() : undefined;
     const calculationKey = source === "calculation" ? getCalculationKey(index) : undefined;
-    const forecastKey = source === "forecast" ? getForecastKey(index) : undefined;
+    const forecastKey = isForecast ? getForecastKey(index) : undefined;
     let raw: StatisticValue[] | undefined;
     let calcUnit: string | null | undefined;
 
@@ -222,7 +223,7 @@ export const buildSeries = ({
         );
         return;
       }
-    } else if (source === "forecast" && forecastKey) {
+    } else if (isForecast && forecastKey) {
       if (!forecastData?.has(forecastKey)) {
         warnOnce(
           `forecast-missing-${index}`,
@@ -272,13 +273,18 @@ export const buildSeries = ({
         : seriesConfig.smooth;
     const smoothValue = isLine ? rawSmooth : undefined;
     const shouldFill = seriesConfig.fill === true;
+    const weatherEntityName = seriesConfig.weather_entity
+      ? hass.states[seriesConfig.weather_entity]?.attributes.friendly_name
+      : undefined;
     const name =
       seriesConfig.name ??
       meta?.name ??
       (statisticId
         ? hass.states[statisticId]?.attributes.friendly_name ?? statisticId
-        : seriesConfig.pv_production_entity ??
-          (source === "forecast" ? `Forecast ${index + 1}` : `Series ${index + 1}`));
+        : source === "weather_forecast"
+          ? seriesConfig.attribute ?? weatherEntityName ?? `Forecast ${index + 1}`
+          : seriesConfig.pv_production_entity ??
+            (source === "forecast" ? `Forecast ${index + 1}` : `Series ${index + 1}`));
 
     const colorToken =
       seriesConfig.color ??

@@ -34,7 +34,16 @@ export interface EnergyCustomGraphCalculationConfig {
   unit?: string | null;
 }
 
-export type EnergyCustomGraphSeriesSource = "statistic" | "calculation" | "forecast";
+export type EnergyCustomGraphSeriesSource =
+  | "statistic"
+  | "calculation"
+  | "forecast"
+  | "weather_forecast";
+
+export type EnergyCustomGraphWeatherForecastType =
+  | "hourly"
+  | "daily"
+  | "twice_daily";
 
 export interface EnergyCustomGraphSeriesConfig {
   source?: EnergyCustomGraphSeriesSource;
@@ -62,6 +71,9 @@ export interface EnergyCustomGraphSeriesConfig {
   clip_min?: number;
   clip_max?: number;
   pv_production_entity?: string;
+  weather_entity?: string;
+  forecast_type?: EnergyCustomGraphWeatherForecastType;
+  attribute?: string;
 }
 
 export interface EnergyCustomGraphRawOptions {
@@ -123,4 +135,5 @@ export interface EnergyCustomGraphCardConfig extends LovelaceCardConfig {
   show_unit?: boolean;
   aggregation?: EnergyCustomGraphAggregationConfig;
   show_stack_sums?: boolean;
+  forecast_horizon?: string;
 }
