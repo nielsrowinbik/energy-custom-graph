@@ -2526,11 +2526,11 @@ export class EnergyCustomGraphCard extends LitElement {
     }
 
     const rangeStart = this._statisticsRange?.start ?? this._periodStart.getTime();
+    // No horizon => show the full now-forward forecast (no upper clamp). With a
+    // horizon, cap the forecast to that far past the period end.
     const horizonMs = parseDurationToMs(this._config.forecast_horizon);
     const rangeEnd =
-      horizonMs && this._periodEnd
-        ? this._periodEnd.getTime() + horizonMs
-        : this._periodEnd?.getTime() ?? this._statisticsRange?.end ?? null;
+      horizonMs && this._periodEnd ? this._periodEnd.getTime() + horizonMs : null;
     const aggregation = this._statisticsPeriod;
 
     const data = new Map<string, StatisticValue[]>();
@@ -2572,12 +2572,15 @@ export class EnergyCustomGraphCard extends LitElement {
   }
 
   private _weatherRangeEnd(): number | null {
-    const periodEnd = this._periodEnd?.getTime() ?? null;
-    if (periodEnd === null) {
+    // By default show the full now-forward forecast the entity provides (no
+    // upper clamp). When forecast_horizon is set it acts as a cap, limiting the
+    // forecast to that far past the period end.
+    const horizonMs = this._forecastHorizonMs();
+    if (!horizonMs) {
       return null;
     }
-    const horizonMs = this._forecastHorizonMs();
-    return horizonMs ? periodEnd + horizonMs : periodEnd;
+    const periodEnd = this._periodEnd?.getTime() ?? null;
+    return periodEnd === null ? null : periodEnd + horizonMs;
   }
 
   private _clearWeatherForecastData(): void {
@@ -3584,6 +3587,14 @@ export class EnergyCustomGraphCard extends LitElement {
 
     this._evaluateSectionLayout();
 
+    // Re-filter weather forecast data whenever the visible period changes (e.g.
+    // energy date-picker navigation). The subscription and its cached forecast
+    // items persist across navigation, so without this the forecast would only
+    // reappear on a full refresh or the next push event.
+    if (changedProps.has("_periodStart") || changedProps.has("_periodEnd")) {
+      this._rebuildWeatherForecastData();
+    }
+
     if (
       changedProps.has("_statistics") ||
       changedProps.has("_metadata") ||
@@ -3786,6 +3797,22 @@ export class EnergyCustomGraphCard extends LitElement {
     );
     this._weatherForecastUnits.forEach((value, key) => forecastUnits.set(key, value));
 
+    // Latest timestamp present in any forecast series, used to stretch the
+    // x-axis so the full forecast is visible when no forecast_horizon cap is set.
+    let maxForecastTs: number | undefined;
+    forecastData.forEach((values) => {
+      values.forEach((value) => {
+        const ts = value.end ?? value.start;
+        if (
+          typeof ts === "number" &&
+          Number.isFinite(ts) &&
+          (maxForecastTs === undefined || ts > maxForecastTs)
+        ) {
+          maxForecastTs = ts;
+        }
+      });
+    });
+
     const {
       series: mainSeries,
       legend,
@@ -3861,6 +3888,59 @@ export class EnergyCustomGraphCard extends LitElement {
       placeholderByBase.set(baseKey, placeholder);
       return placeholder;
     };
+
+    // A forecast bar series and the history bar series it accompanies never
+    // share a timestamp, so draw them in the same bar slot instead of reserving
+    // a separate grouped column beside every history bar. Give each forecast bar
+    // without an explicit stack the stack of the first non-forecast bar on its
+    // axis, so ECharts treats the pair as one series.
+    {
+      const barEntries = mainSeries
+        .filter((serie): serie is BarSeriesOption => serie.type === "bar")
+        .map((serie) => ({
+          serie,
+          config: typeof serie.id === "string" ? seriesById.get(serie.id) : undefined,
+          axis: typeof serie.yAxisIndex === "number" ? serie.yAxisIndex : 0,
+          explicitStack:
+            typeof serie.stack === "string" && serie.stack.trim() !== ""
+              ? serie.stack
+              : undefined,
+        }));
+      const forecastAxes = new Set<number>();
+      barEntries.forEach((entry) => {
+        if (entry.config && this._isForecastLikeSeries(entry.config)) {
+          forecastAxes.add(entry.axis);
+        }
+      });
+      if (forecastAxes.size) {
+        const anchorStackByAxis = new Map<number, string>();
+        barEntries.forEach((entry) => {
+          if (entry.config && this._isForecastLikeSeries(entry.config)) {
+            return;
+          }
+          if (!forecastAxes.has(entry.axis) || anchorStackByAxis.has(entry.axis)) {
+            return;
+          }
+          const anchorStack = entry.explicitStack ?? `__forecast_merge_${entry.axis}`;
+          anchorStackByAxis.set(entry.axis, anchorStack);
+          if (!entry.explicitStack) {
+            entry.serie.stack = anchorStack;
+          }
+        });
+        barEntries.forEach((entry) => {
+          if (!entry.config || !this._isForecastLikeSeries(entry.config)) {
+            return;
+          }
+          if (entry.explicitStack) {
+            return;
+          }
+          const anchorStack = anchorStackByAxis.get(entry.axis);
+          if (anchorStack) {
+            entry.serie.stack = anchorStack;
+          }
+        });
+      }
+    }
 
     mainSeries.forEach((serie, index) => {
       if (serie.type !== "bar") {
@@ -4092,9 +4172,15 @@ export class EnergyCustomGraphCard extends LitElement {
       ? this._computeSuggestedXAxisMax(this._periodStart, this._periodEnd)
       : (this._statisticsRange.end ?? this._periodStart.getTime());
 
-    const horizonMs = this._forecastHorizonMs();
-    if (horizonMs && this._periodEnd && this._hasForecastLikeSeries()) {
-      axisMax = Math.max(axisMax, this._periodEnd.getTime() + horizonMs);
+    if (this._periodEnd && this._hasForecastLikeSeries()) {
+      const horizonMs = this._forecastHorizonMs();
+      if (horizonMs) {
+        // Reserve the axis out to the horizon even when the data is shorter.
+        axisMax = Math.max(axisMax, this._periodEnd.getTime() + horizonMs);
+      } else if (maxForecastTs !== undefined) {
+        // No horizon cap: stretch the axis to fit the full forecast.
+        axisMax = Math.max(axisMax, maxForecastTs);
+      }
     }
 
     const xAxis: XAxisOption[] = [
