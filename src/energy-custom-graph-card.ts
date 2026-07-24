@@ -2526,11 +2526,14 @@ export class EnergyCustomGraphCard extends LitElement {
     }
 
     const rangeStart = this._statisticsRange?.start ?? this._periodStart.getTime();
-    // No horizon => show the full now-forward forecast (no upper clamp). With a
-    // horizon, cap the forecast to that far past the period end.
+    // Clamp the forecast to the visible period so the view always respects the
+    // selected timespan. forecast_horizon is an explicit opt-in to extend the
+    // fetched/shown range past the period end.
     const horizonMs = parseDurationToMs(this._config.forecast_horizon);
     const rangeEnd =
-      horizonMs && this._periodEnd ? this._periodEnd.getTime() + horizonMs : null;
+      horizonMs && this._periodEnd
+        ? this._periodEnd.getTime() + horizonMs
+        : this._periodEnd?.getTime() ?? this._statisticsRange?.end ?? null;
     const aggregation = this._statisticsPeriod;
 
     const data = new Map<string, StatisticValue[]>();
@@ -2572,15 +2575,15 @@ export class EnergyCustomGraphCard extends LitElement {
   }
 
   private _weatherRangeEnd(): number | null {
-    // By default show the full now-forward forecast the entity provides (no
-    // upper clamp). When forecast_horizon is set it acts as a cap, limiting the
-    // forecast to that far past the period end.
-    const horizonMs = this._forecastHorizonMs();
-    if (!horizonMs) {
+    // Clamp the forecast to the visible period so the view always respects the
+    // selected timespan regardless of how far ahead the entity forecasts.
+    // forecast_horizon is an explicit opt-in to extend past the period end.
+    const periodEnd = this._periodEnd?.getTime() ?? null;
+    if (periodEnd === null) {
       return null;
     }
-    const periodEnd = this._periodEnd?.getTime() ?? null;
-    return periodEnd === null ? null : periodEnd + horizonMs;
+    const horizonMs = this._forecastHorizonMs();
+    return horizonMs ? periodEnd + horizonMs : periodEnd;
   }
 
   private _clearWeatherForecastData(): void {
@@ -3797,22 +3800,6 @@ export class EnergyCustomGraphCard extends LitElement {
     );
     this._weatherForecastUnits.forEach((value, key) => forecastUnits.set(key, value));
 
-    // Latest timestamp present in any forecast series, used to stretch the
-    // x-axis so the full forecast is visible when no forecast_horizon cap is set.
-    let maxForecastTs: number | undefined;
-    forecastData.forEach((values) => {
-      values.forEach((value) => {
-        const ts = value.end ?? value.start;
-        if (
-          typeof ts === "number" &&
-          Number.isFinite(ts) &&
-          (maxForecastTs === undefined || ts > maxForecastTs)
-        ) {
-          maxForecastTs = ts;
-        }
-      });
-    });
-
     const {
       series: mainSeries,
       legend,
@@ -4172,15 +4159,11 @@ export class EnergyCustomGraphCard extends LitElement {
       ? this._computeSuggestedXAxisMax(this._periodStart, this._periodEnd)
       : (this._statisticsRange.end ?? this._periodStart.getTime());
 
-    if (this._periodEnd && this._hasForecastLikeSeries()) {
-      const horizonMs = this._forecastHorizonMs();
-      if (horizonMs) {
-        // Reserve the axis out to the horizon even when the data is shorter.
-        axisMax = Math.max(axisMax, this._periodEnd.getTime() + horizonMs);
-      } else if (maxForecastTs !== undefined) {
-        // No horizon cap: stretch the axis to fit the full forecast.
-        axisMax = Math.max(axisMax, maxForecastTs);
-      }
+    const horizonMs = this._forecastHorizonMs();
+    if (horizonMs && this._periodEnd && this._hasForecastLikeSeries()) {
+      // forecast_horizon is the only opt-in to extend the axis past the period
+      // end; otherwise the axis stays within the selected view.
+      axisMax = Math.max(axisMax, this._periodEnd.getTime() + horizonMs);
     }
 
     const xAxis: XAxisOption[] = [

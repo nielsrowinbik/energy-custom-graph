@@ -12,7 +12,7 @@ It grew out of an energy-focused card, so it integrates tightly with the energy 
 - Supports any entity that exposes long-term statistics, as well as the short-term 'raw' history.
 - Solar forecast entities that are used in the energy dashboard can also be shown in the charts.
 - Weather forecast attributes (temperature, precipitation, wind, humidity, …) can be plotted from any `weather.*` entity, fetched live via the same websocket API the native weather-forecast card uses.
-- Forecast series show their full now-forward range by default (the x-axis stretches to fit), with an optional `forecast_horizon` to cap how far ahead they reach.
+- Optional `forecast_horizon` extends the visible time range beyond the selected period so upcoming forecast data stays in view.
 - Allows to compute and display 'live' values for the current running hour before HA provides the final aggregation.
 - Uses Home Assistant's bundled ECharts runtime – no extra framework needs to be loaded.
 - Override the energy date pickers default aggregation periods, to e.g. display hourly instead of daily bars when viewing a monthly report.
@@ -122,7 +122,7 @@ By default the card mirrors the core energy cards and automatically selects the 
 | `title` | string | – | Optional card header. |
 | `chart_height` | string | – | CSS height (e.g. `300px`). Ignored when the card is used inside a section layout (the grid rows control the height). |
 | `timespan` | object | `{mode: "energy"}` | Controls the time range displayed (see below). |
-| `forecast_horizon` | string | – | Optional cap on how far forward forecast data is shown/fetched, measured from the period end (e.g. `48h`, `7d`). When unset, the full forecast the entity provides is shown and the x-axis stretches to fit it. See the note under Timespan options. |
+| `forecast_horizon` | string | – | Optional. Extends the chart's x-axis beyond the selected period end so upcoming forecast data stays visible (e.g. `48h`, `7d`). Off by default; see the note under Timespan options. |
 | `collection_key` | string | – | Custom key when multiple energy date pickers are present (only for `timespan.mode: "energy"`). <br>[More Info](https://www.home-assistant.io/dashboards/energy/#using-multiple-collections) |
 | `allow_compare` | boolean | `true` | For energy date picker mode: Respects the compare toggle when `true`. Set to `false` to disable this behavior. |
 | `hide_legend` | boolean | `false` | Hide the legend entirely. |
@@ -174,13 +174,13 @@ Display a fixed time range. Dates use ISO 8601 format. If omitted, `start` defau
 
 **Forecast horizon**
 
-Forecast series (`source: forecast` and `source: weather_forecast`) are always now-forward — they only ever contain data from the current moment onwards, so a picker window entirely in the past renders no forecast at all.
+Forecast series (`source: forecast` and `source: weather_forecast`) are always now-forward — they only ever contain data from the current moment onwards, so a picker window entirely in the past renders no forecast at all. By default the x-axis still ends at the selected period end, which can cut a forecast short.
 
-By default the card shows the **full** forecast the entity provides and automatically stretches the x-axis past the selected period end to fit it, while the picker still governs the historic window. Set the top-level `forecast_horizon` (e.g. `48h`, `7d`) to **cap** how far forward the forecast is shown and fetched — measured from the period end. Supported units: `s`, `m`, `h`, `d`, `w`. Use it when a multi-day forecast would otherwise stretch the axis further than you want.
+Set the top-level `forecast_horizon` (e.g. `48h`, `7d`) to push the x-axis maximum past the period end by that duration, so the full forecast horizon is visible while the picker still shows the current period. It also widens how far forward forecast data is fetched. Supported units: `s`, `m`, `h`, `d`, `w`. When unset, the picker-driven axis behaviour is unchanged.
 
 ```yaml
 type: custom:new-statistics-graph
-forecast_horizon: 48h   # optional cap; omit to show the entity's full forecast
+forecast_horizon: 48h
 series:
   - source: weather_forecast
     weather_entity: weather.home
@@ -279,7 +279,7 @@ Set `source: weather_forecast` on a series to plot a forecast attribute from any
 
 Notes:
 
-- Forecasts are **now-forward** only: points before the current time are dropped, so a picker window entirely in the past shows nothing. The full forecast is shown by default (the x-axis stretches past the period end to fit it); use `forecast_horizon` to cap how far ahead it reaches (see Timespan options).
+- Forecasts are **now-forward** only: points before the current time are dropped, so a picker window entirely in the past shows nothing. Use `forecast_horizon` to extend the visible range past the period end (see Timespan options).
 - The card derives the unit from the weather entity's `*_unit` attributes when possible (temperature, precipitation, wind, pressure, visibility) and uses `%` for humidity/cloud coverage. Override it per axis with `y_axes[].unit` if needed.
 - All display options (color, `chart_type`, `line_style`, `fill`, `smooth`, `y_axis`, `multiply`, `add`, …) work exactly like for statistic-based series.
 
